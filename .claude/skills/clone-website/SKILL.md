@@ -15,11 +15,12 @@ This is not a two-phase process (inspect then build). You are a **foreman walkin
 
 ## Scope Defaults
 
-The target is whatever page `$ARGUMENTS` resolves to. Clone exactly what's visible at that URL. Unless the user specifies otherwise, use these defaults:
+The target is the application `$ARGUMENTS` resolves to. Clone the **whole reachable application** — the landing/entry URL AND every route reachable from it (including routes behind a login wall). Do NOT stop at the single entry URL, and do NOT stop at a login page. Unless the user specifies otherwise, use these defaults:
 
 - **Fidelity level:** Pixel-perfect — exact match in colors, spacing, typography, animations
-- **In scope:** Visual layout and styling, component structure and interactions, responsive design, mock data for demo purposes
-- **Out of scope:** Real backend / database, authentication, real-time features, SEO optimization, accessibility audit
+- **In scope:** Visual layout and styling, component structure and **all interactive states** (modals, toasts, loading/empty/error, hover/active/disabled, theme variants), responsive design, **every reachable route**, mock data for demo purposes
+- **Authentication: IN SCOPE.** If a route is gated by a login / 2FA wall, authenticate so you can reach the real authenticated surface — that surface IS the product. To get credentials, call the `operator-bridge` MCP tool `request_credentials` (and `request_code` for a 2FA/verification code). These tools block until a human operator replies, then return the secret. Log in with the reply and continue. If a tool returns `NO_OPERATOR_RESPONSE` (no operator available), degrade gracefully to cloning only the public/pre-auth surface — never guess or brute-force credentials.
+- **Out of scope:** Real backend / database, real-time features, SEO optimization, accessibility audit, and any **elevated / SuperAdmin-only** area (clone the normal authenticated user surface only).
 - **Customization:** None — pure emulation
 
 If the user provides additional instructions (specific fidelity level, customizations, extra context), honor those over the defaults.
@@ -28,9 +29,10 @@ If the user provides additional instructions (specific fidelity level, customiza
 
 1. **Browser automation is required.** Check for available browser MCP tools (Chrome MCP, Playwright MCP, Browserbase MCP, Puppeteer MCP, etc.). Use whichever is available — if multiple exist, prefer Chrome MCP. If none are detected, ask the user which browser tool they have and how to connect it. This skill cannot work without browser automation.
 2. Parse `$ARGUMENTS` as one or more URLs. Normalize and validate each URL; if any are invalid, ask the user to correct them before proceeding. For each valid URL, verify it is accessible via your browser MCP tool.
-3. Verify the base project builds: `npm run build`. The Next.js + shadcn/ui + Tailwind v4 scaffold should already be in place. If not, tell the user to set it up first.
-4. Create the output directories if they don't exist: `docs/research/`, `docs/research/components/`, `docs/design-references/`, `scripts/`. For multiple clones, also prepare per-site folders like `docs/research/<hostname>/` and `docs/design-references/<hostname>/`.
-5. When working with multiple sites in one command, optionally confirm whether to run them in parallel (recommended, if resources allow) or sequentially to avoid overload.
+3. **Authenticate FIRST if the entry page is a login wall.** Navigate to the entry URL and detect a login form (a password field, "Sign in" submit, or SSO buttons). If present, the real target is *behind* it: call the `operator-bridge` MCP `request_credentials` tool, wait for the operator's reply, fill the form and submit (call `request_code` if a 2FA/verification prompt appears), and confirm you land on an authenticated page before doing recon. The authenticated surface is the product — recon run only on the login page captures ~nothing. If `request_credentials` returns `NO_OPERATOR_RESPONSE`, proceed with the public surface only.
+4. Verify the base project builds: `npm run build`. The Next.js + shadcn/ui + Tailwind v4 scaffold should already be in place. If not, tell the user to set it up first.
+5. Create the output directories if they don't exist: `docs/research/`, `docs/research/components/`, `docs/design-references/`, `scripts/`. For multiple clones, also prepare per-site folders like `docs/research/<hostname>/` and `docs/design-references/<hostname>/`.
+6. When working with multiple sites in one command, optionally confirm whether to run them in parallel (recommended, if resources allow) or sequentially to avoid overload.
 
 ## Guiding Principles
 
@@ -107,6 +109,12 @@ For scroll-dependent elements:
 - Record the transition CSS (duration, easing, properties)
 - Record the exact trigger threshold (scroll position in px, or viewport intersection ratio)
 
+For **async data states** (these are invisible at page load and are the most commonly missed — a real data app spends most of its life in one of these):
+- **Loading:** throttle the network (browser MCP slow-3G / offline-then-online) or reload and capture the spinner / skeleton frame BEFORE data arrives.
+- **Empty:** reach a list with zero rows (filter to nothing, or open a fresh/empty resource) and capture the empty-state copy + illustration.
+- **Error:** force a request to fail (block the endpoint / go offline mid-load) and capture the error toast + any fallback UI.
+- Record the exact copy for each — empty/error strings are real product copy and cannot be invented.
+
 ### 8. Spec Files Are the Source of Truth
 
 Every component gets a specification file in `docs/research/components/` BEFORE any builder is dispatched. This file is the contract between your extraction work and the builder agent. The builder receives the spec file contents inline in its prompt — the file also persists as an auditable artifact that the user (or you) can review if something looks wrong.
@@ -119,7 +127,18 @@ Every builder agent must verify `npx tsc --noEmit` passes before finishing. Afte
 
 ## Phase 1: Reconnaissance
 
-Navigate to the target URL with browser MCP.
+Navigate to the target URL with browser MCP. **If it is a login wall, authenticate first** (Pre-Flight step 3) — recon must run on the real authenticated app, not the login page.
+
+### Route Enumeration (do this FIRST, before per-page recon)
+
+A real app is many routes, not one page. Before any per-page work, enumerate every reachable route and recon **each** one. Skipping this is the single biggest miss — a clone of only the entry route reproduces a fraction of the product.
+
+1. **Discover routes** from the authenticated app: read every sidebar/nav `<a href>`, header menu, dashboard tiles, in-app router links, footer links, and any `sitemap.xml`. Also probe obvious siblings of what you see (e.g. if `/campaigns` exists, check `/campaigns/new`, a detail route, a trash/archive route).
+2. **Build a ROUTE LIST** — the deduplicated set of in-app paths. Cap at **25 routes** (if more, prioritize: every distinct top-level feature first, then sub-routes). For **dynamic routes** (`/items/:id`), clone ONE representative instance per pattern (open a real record, note the path is a template).
+3. **Recon EACH route** — run the Screenshots + Global Extraction (first route only for global tokens) + Mandatory Interaction Sweep (every route) below, once per route. Namespace artifacts per route, e.g. `docs/research/<route-slug>/`.
+4. Record the full route list + which are public vs. authenticated + the nav structure in `docs/research/ROUTE_MAP.md`. This is the breadth blueprint; `PAGE_TOPOLOGY.md` (below) is written per route.
+
+The Screenshots / Global Extraction / Interaction Sweep / Page Topology steps below now run **per route in the ROUTE LIST** (global tokens — fonts/colors/favicons — are extracted once from the first route and reused).
 
 ### Screenshots
 - Take **full-page screenshots** at desktop (1440px) and mobile (390px) viewports
@@ -148,10 +167,17 @@ This is a dedicated pass AFTER screenshots and BEFORE anything else. Its purpose
 - Are there scroll-snap points? Record which containers.
 - Is there a smooth scroll library active? Check for non-native scroll behavior.
 
-**Click sweep:** Click every element that looks interactive:
-- Every button, tab, pill, link, card
-- Record what happens: does content change? Does a modal open? Does a dropdown appear?
-- For tabs/pills: click EACH ONE and record the content that appears for each state
+**Click sweep — exhaustive. This is where most fidelity is won or lost.** Drive EVERY interactive surface and record its result. Do not skip a surface because reaching it needs a click — that is exactly what a screenshot misses. Per route, work through this matrix:
+
+- **Every button** — record all 4 visual states (default / hover / active / disabled) for each variant and size, plus the button's label.
+- **Every modal / dialog** — click each trigger, OPEN the modal, and capture: full DOM, every form field + its placeholder/label, the validation behaviour (submit empty / invalid → capture the inline error AND the toast), and the success path. Many surfaces are reachable ONLY via a modal — an unopened modal is an unclonable modal.
+- **Every toast / alert** — perform each action's success AND failure path and record the toast **copy verbatim**, plus its color, icon, position, and duration. Toast strings are real product copy — they cannot be invented; you must read them.
+- **Every confirm / delete / restore dialog** — trigger the destructive action and capture the exact confirmation copy ("Are you sure…"), whether it is a custom danger modal or a native `window.confirm`.
+- **Every tab set** — click EACH tab and record each panel's content + the active/inactive styles + the switch animation.
+- **Header surfaces** — open the user/profile dropdown (record items + divider), the notifications bell panel (record items + the empty state), and toggle the **theme** (light↔dark): the theme toggle yields a FULL second color variant of the page — capture both.
+- **Pagination / row-action menus** — exercise next/prev/limit and any per-row "…" action menus; record the controls and offset behaviour.
+
+For tabs/pills/stateful content: click EACH ONE and record the content that appears for each state (this already-existing rule still applies, now under the fuller matrix above).
 
 **Hover sweep:** Hover over every element that might have hover states:
 - Buttons, cards, links, images, nav items
@@ -357,6 +383,20 @@ For each section (or sub-component, if you're breaking it up), create a spec fil
 - Title: "..."
 - Cards: [...]
 
+## Modal Variants (if this surface opens any modal/dialog)
+For EACH modal: name, trigger, full DOM/layout, every form field (label + placeholder + type), validation rules + the inline error AND toast on invalid submit, and the success behaviour. Confirm/delete dialogs: the exact "Are you sure…" copy and whether custom or native `window.confirm`.
+
+## Toast Catalog (verbatim copy — required if this surface fires any toast/alert)
+For EACH action: the success toast and the error toast — copy **verbatim**, plus color, icon, position, duration. Do NOT paraphrase; these are product strings.
+
+## Async States (loading / empty / error — required for any data-driven surface)
+- **Loading:** spinner/skeleton frame.
+- **Empty:** empty-state copy (verbatim) + illustration.
+- **Error:** error toast copy (verbatim) + fallback UI.
+
+## Theme Variant (if the app has a light/dark toggle)
+The full second color set for this surface — every token/value that changes between light and dark.
+
 ## Assets
 - Background image: `public/images/<file>.webp`
 - Overlay image: `public/images/<file>.png`
@@ -447,6 +487,10 @@ Before dispatching ANY builder agent, verify you can check every box. If you can
 
 These are lessons from previous failed clones — each one cost hours of rework:
 
+- **Don't stop at the login page.** If the target is gated, authenticate via the `operator-bridge` and clone the surface BEHIND the wall — that surface is the product. A clone of only the login screen is a near-total miss.
+- **Don't clone only the entry route.** Enumerate and clone EVERY reachable route (up to the 25-route cap). A single-page clone of a multi-route app reproduces a fraction of it.
+- **Don't skip a modal/toast/dialog because it needs a click.** Open every modal, fire every toast (success AND error), trigger every confirm dialog, and record the copy verbatim. These are invisible to a screenshot and are most of the product's real surface.
+- **Don't skip the async states.** Loading, empty, and error states are where a data app spends most of its life — force-trigger and capture each.
 - **Don't build click-based tabs when the original is scroll-driven (or vice versa).** Determine the interaction model FIRST by scrolling before clicking. This is the #1 most expensive mistake — it requires a complete rewrite, not a CSS fix.
 - **Don't extract only the default state.** If there are tabs showing "Featured" on load, click Productivity, Creative, Lifestyle and extract each one's cards/content. If the header changes on scroll, capture styles at position 0 AND position 100+.
 - **Don't miss overlay/layered images.** A background watercolor + foreground UI mockup = 2 images. Check every container's DOM tree for multiple `<img>` elements and positioned overlays.
@@ -464,9 +508,12 @@ These are lessons from previous failed clones — each one cost hours of rework:
 ## Completion
 
 When done, report:
+- **Authentication:** whether the app required login and whether you authenticated (or degraded to public surface because `NO_OPERATOR_RESPONSE`).
+- **Route coverage:** the full ROUTE LIST from `ROUTE_MAP.md`, and confirmation that EVERY route was authored (X of N routes built). Any route skipped (and why — e.g. dynamic `:id` collapsed to one instance, or SuperAdmin out of scope).
 - Total sections built
 - Total components created
 - Total spec files written (should match components)
+- **Interaction coverage per route:** for each route, confirm the per-page checklist passed — every modal opened, every toast captured (verbatim), every confirm dialog, every tab set, header dropdown + notifications + theme toggle, and the loading/empty/error states.
 - Total assets downloaded (images, videos, SVGs, fonts)
 - Build status (`npm run build` result)
 - Visual QA results (any remaining discrepancies)
