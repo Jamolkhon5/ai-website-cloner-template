@@ -1,6 +1,6 @@
 ---
 name: clone-website
-description: Reverse-engineer and clone one or more websites in one shot — extracts assets, CSS, and content section-by-section and proactively dispatches parallel builder agents in worktrees as it goes. Use this whenever the user wants to clone, replicate, rebuild, reverse-engineer, or copy any website. Also triggers on phrases like "make a copy of this site", "rebuild this page", "pixel-perfect clone". Provide one or more target URLs as arguments.
+description: Reverse-engineer and clone one or more websites in one shot — extracts assets, CSS, content AND interactive behaviour section-by-section, then dispatches parallel builder agents that implement WORKING React (real modals, toasts, tabs, forms, theme) — not dead static markup. Use this whenever the user wants to clone, replicate, rebuild, reverse-engineer, or copy any website. Also triggers on phrases like "make a copy of this site", "rebuild this page", "pixel-perfect clone", "make the buttons work". Provide one or more target URLs as arguments.
 argument-hint: "<url1> [<url2> ...]"
 user-invocable: true
 ---
@@ -124,6 +124,19 @@ The spec file is not optional. It is not a nice-to-have. If you dispatch a build
 ### 9. Build Must Always Compile
 
 Every builder agent must verify `npx tsc --noEmit` passes before finishing. After merging worktrees, you verify `npm run build` passes. A broken build is never acceptable, even temporarily.
+
+### 10. A Clone That Doesn't WORK Is a Failed Clone
+
+This is the principle that separates a screenshot from a clone. **Pixel-perfect appearance with dead buttons is a FAILURE.** If a user clicks "Send SMS" and no modal opens, clicks a tab and nothing switches, submits an empty form and no validation toast fires, or toggles the theme and nothing changes — the clone is not done, no matter how perfect it looks frozen.
+
+Capturing a modal's DOM/copy into a spec file is **not** the goal — it is the input. The goal is that the cloned button, when clicked, **actually opens that modal**. Every interactive surface you captured in the Interaction Sweep MUST be **implemented as working React behaviour**, not rendered as static markup. The concrete rules:
+
+- **Any page with an interactive surface is a client component** — it starts with `"use client"` and holds real state (`useState`/`useReducer`). A static server component that renders a button it never wires is the #1 clone defect. The default-export page (or the interactive sub-component) must be `"use client"`.
+- **Triggers are wired, not decorative.** Every `<button>`/menu/tab/row-action you captured gets a real `onClick` (or `onChange`) that drives state — opening a modal, switching a tab, firing a toast, mutating a mock list.
+- **Behaviour runs against mock data, not a real backend.** Seed an in-file mock array/object so lists render rows, pagination slices, empty-filters show the empty state, and a `loading` flag can show the captured spinner. NEVER `fetch()` the original backend (it won't be there, breaks `output:export`, and leaks the original's API). Mock it client-side.
+- **Verbatim captured copy is the product.** Toast strings, empty-state copy, confirm "Are you sure…" text, validation messages — use the EXACT strings you captured. Do not invent or paraphrase.
+
+The dedicated **Phase 3.5 (Behavior Implementation)** below makes this mechanical, and the **Phase 5.5 functional gate** proves it by re-driving the clone's OWN buttons.
 
 ## Phase 1: Reconnaissance
 
@@ -429,6 +442,7 @@ Based on complexity, dispatch builder agent(s) in worktree(s):
 - The target file path (e.g., `src/components/HeroSection.tsx`)
 - Instruction to verify with `npx tsc --noEmit` before finishing
 - For responsive behavior: the specific breakpoint values and what changes
+- **The Behaviour Implementation mandate (Phase 3.5):** if the spec has ANY `States & Behaviors`, `Modal Variants`, `Toast Catalog`, `Async States`, tabs, confirm dialogs, or header chrome, the builder MUST implement them as WORKING React (`"use client"`, state, wired `onClick`, conditional modal render, `toast.*` with verbatim copy, mock data) — NOT static markup. Spell this out per surface in the prompt: e.g. "the `Send SMS` button must `onClick`→`setSendOpen(true)`; render `<SendSmsModal open={sendOpen} onClose={…}>` with the captured fields; submit-empty fires `toast.error('Phone number is required')`." A builder that ships a dead button has not completed its task.
 
 **Don't wait.** As soon as you've dispatched the builder(s) for one section, move to extracting the next section. Builders work in parallel in their worktrees while you continue extraction.
 
@@ -441,6 +455,27 @@ As builder agents complete their work:
 - If a merge introduces type errors, fix them immediately
 
 The extract → spec → dispatch → merge cycle continues until all sections are built.
+
+## Phase 3.5: Behavior Implementation (make every captured surface actually work)
+
+Capture (Phase 1) and static build (Phase 3) are upstream of this. This phase is where the clone stops being a screenshot and becomes a working app. For EACH interactive surface you captured, the responsible builder implements real behaviour. This is non-negotiable — it is the difference between a clone the user can click through and a dead mockup.
+
+**The implementation contract, per surface class:**
+
+- **Modal / dialog** — the host page is `"use client"` with `const [<name>Open, set<Name>Open] = useState(false)`. The captured trigger's `onClick` calls `set<Name>Open(true)`. Render the modal component conditionally (`{<name>Open && <Modal …/>}` or `open=` prop) with the captured title, body, and EVERY captured form field (label/placeholder/type). Backdrop click + Esc + a close button call `set<Name>Open(false)`. Internal tabs (AllClicks/AddContacts etc.) get their own `useState` active-tab.
+- **Toast** — install `react-hot-toast` (pin a version compatible with the scaffold's React, e.g. `react-hot-toast@^2`; match what the original used). Mount `<Toaster position=… />` once in the layout. Every action's success AND error path calls `toast.success('<verbatim>')` / `toast.error('<verbatim>')` with the EXACT captured copy, color, icon, duration. For async submit paths that showed a pending toast, use `toast.loading(...)` (or `toast.promise`) and resolve it to success/error.
+- **Button states** — a button that submits MUST show its captured pending state: swap the label (`Create`→`Creating...`) and set `disabled` while submitting (`disabled={loading}` / `disabled={loading || invalid}`), exactly as the original does it everywhere. Capture and apply all 4 visual states (default/hover/active/disabled) per the spec — a button that fires but never shows pending/disabled feedback is half-implemented.
+- **Form** — controlled inputs (`useState` per field or one form-state object). On submit: run the captured client-side validation in order, firing the captured error toast for the first failure ("Phone number is required", "Invalid JSON in variables field", …); on valid submit show the captured success toast and close/redirect. No real network — validate + mutate mock state + toast.
+- **Tabs / pills** — `useState` active key; clicking a tab switches the rendered panel; apply the captured active/inactive styles + transition.
+- **Confirm / delete / restore** — implement the captured pattern: a custom danger modal ("Are you sure you want to delete **X**?") OR `window.confirm(...)`; confirming removes the row from the mock array and fires the captured toast.
+- **Lists** — seed a realistic in-file **mock array** (5-12 rows) so the list renders populated by default. A filter/search that matches nothing → render the captured **empty state**. A `loading` boolean (optionally a fake 600ms delay on first mount) → render the captured spinner/skeleton. Pagination (`limit`/`offset`) slices the mock array.
+- **Header chrome** — user dropdown (Profile/Settings/Logout) opens on click; notifications bell opens its panel (with the captured empty state); the **theme toggle** flips the real theme class on `<html>`/`documentElement` exactly as the original does (many apps add the new class AND remove the old — e.g. add `dark` + remove `light`, or vice-versa; match the captured behaviour, don't assume dark-only) so the whole page switches to the captured second color set. `next-themes` is fine (export-safe).
+
+**Mock-data module:** create `src/lib/mock/<feature>.ts` exporting the seed arrays so list pages, modals, and stats all read from one place. Keeps pages client-interactive without any backend.
+
+**`output:export` safety (do NOT break the build):** client components, `useState`, `react-hot-toast`, and `dark`-class theming are ALL static-export compatible. Forbidden (they break `next export` or leak the original): server actions, `fetch()` to the original backend, server-only data loading, route handlers, `next/headers`, dynamic server params. Keep every interactive page client-side + mock-data-driven.
+
+**Per-surface done check (builder self-gate):** the builder does not finish a surface until — in its own head/`tsc` — the trigger is wired to state, the surface renders conditionally, and the captured copy is verbatim. A rendered-but-unwired trigger is an incomplete task, same as a type error. **Note: `tsc` passing does NOT mean a surface works** (a dead button type-checks fine). Builder self-report is **provisional**; the only authority that marks a surface truly done is the **Phase 5.5 functional gate**, which clicks the clone's own button and observes the result.
 
 ## Phase 4: Page Assembly
 
@@ -468,6 +503,27 @@ After assembly, do NOT declare the clone complete. Take side-by-side comparison 
 
 Only after this visual QA pass is the clone complete.
 
+## Phase 5.5: Functional Gate (re-drive the CLONE's own buttons — the real completion bar)
+
+Visual QA (Phase 5) proves it LOOKS right. This phase proves it WORKS. Run the production build/preview of YOUR CLONE and drive it with browser MCP exactly as a user would — clicking the clone's own buttons, not the original's. For each captured trigger, click it and ASSERT the captured surface actually appears:
+
+- Click each modal trigger → the modal OPENS (assert its title/fields are in the DOM). Close it.
+- Submit a form empty/invalid → the captured validation **toast fires** (assert the verbatim copy appears).
+- Submit a form valid → the captured success toast fires + modal closes / redirect happens.
+- Click each tab → the panel **switches** (assert different content is shown).
+- Trigger a delete/confirm → the confirm appears; confirming removes the mock row.
+- Open the header user dropdown + notifications panel → they open.
+- Toggle the theme → the page **actually switches** light↔dark (assert a color token changed).
+- Exercise pagination → the rows change.
+
+**Coverage line (the completion metric):** per route, count
+```
+triggers_captured:   <N>   # interactive surfaces captured in Phase 1
+triggers_functional: <M>   # surfaces that DEMONSTRABLY work when clicked on the clone (this phase)
+functional_coverage: triggers_functional / triggers_captured
+```
+A route is complete only when `functional_coverage == 1.0`. A captured-but-dead trigger fails the gate — go back to Phase 3.5 and wire it. **Do NOT report the clone done while any captured button does nothing when clicked.** This gate is the direct answer to "the buttons don't work": they must work here, verified by clicking them, before completion.
+
 ## Pre-Dispatch Checklist
 
 Before dispatching ANY builder agent, verify you can check every box. If you can't, go back and extract more.
@@ -482,6 +538,7 @@ Before dispatching ANY builder agent, verify you can check every box. If you can
 - [ ] Responsive behavior is documented for at least desktop and mobile
 - [ ] Text content is verbatim from the site, not paraphrased
 - [ ] The builder prompt is under ~150 lines of spec; if over, the section needs to be split
+- [ ] **Behaviour mandate is in the prompt:** every captured modal/toast/tab/confirm/form/chrome surface is spelled out as a WORKING-React instruction (`"use client"` + state + wired `onClick` + conditional render + verbatim `toast.*` + mock data), not "render this button". A dead button is an incomplete build.
 
 ## What NOT to Do
 
@@ -504,6 +561,8 @@ These are lessons from previous failed clones — each one cost hours of rework:
 - **Don't skip responsive extraction.** If you only inspect at desktop width, the clone will break at tablet and mobile. Test at 1440, 768, and 390 during extraction.
 - **Don't forget smooth scroll libraries.** Check for Lenis (`.lenis` class), Locomotive Scroll, or similar. Default browser scrolling feels noticeably different and the user will spot it immediately.
 - **Don't dispatch builders without a spec file.** The spec file forces exhaustive extraction and creates an auditable artifact. Skipping it means the builder gets whatever you can fit in a prompt from memory.
+- **Don't ship dead buttons (the #1 functional defect).** A cloned `<button>` with no `onClick`, a page with no `"use client"`/state, a captured modal that never renders, a tab bar that doesn't switch, a form with no validation toasts, a theme toggle that does nothing — these are FAILURES even if pixel-perfect. Capturing a surface into a spec is the input, not the deliverable; the deliverable is the clone's own button WORKING when clicked (Phase 3.5 implements it, Phase 5.5 proves it).
+- **Don't `fetch()` the original backend or use server-only features.** It won't exist for the clone, it breaks `output:export`, and it leaks the original's API. Drive every interactive surface from client-side mock data + `useState`.
 
 ## Completion
 
@@ -514,6 +573,7 @@ When done, report:
 - Total components created
 - Total spec files written (should match components)
 - **Interaction coverage per route:** for each route, confirm the per-page checklist passed — every modal opened, every toast captured (verbatim), every confirm dialog, every tab set, header dropdown + notifications + theme toggle, and the loading/empty/error states.
+- **FUNCTIONAL coverage per route (the headline bar — Phase 5.5):** `triggers_functional / triggers_captured` for each route, and the proof that captured buttons WORK when clicked on the clone (modals open, toasts fire, tabs switch, theme flips). A route is only "done" at `functional_coverage == 1.0`. Call out any trigger that still doesn't work.
 - Total assets downloaded (images, videos, SVGs, fonts)
 - Build status (`npm run build` result)
 - Visual QA results (any remaining discrepancies)
